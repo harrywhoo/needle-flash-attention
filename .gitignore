@@ -1,0 +1,23 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+*.egg
+*.egg-info/
+dist/
+build/
+
+# Windows
+desktop.ini
+Thumbs.db
+
+# Data and submissions
+*.tar.gz
+data/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo

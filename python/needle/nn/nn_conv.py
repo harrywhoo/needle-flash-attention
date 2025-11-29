@@ -5,6 +5,7 @@ from needle.autograd import Tensor
 from needle import ops
 import needle.init as init
 import numpy as np
+import math
 from .nn_basic import Parameter, Module
 
 
@@ -28,10 +29,46 @@ class Conv(Module):
         self.stride = stride
 
         ### BEGIN YOUR SOLUTION
-        raise NotImplementedError()
+        self.device = device
+        self.dtype = dtype
+
+        # Initialize weight (k, k, in, out)
+        fan_in = in_channels * kernel_size * kernel_size
+        fan_out = out_channels * kernel_size * kernel_size
+        self.weight = Parameter(
+            init.kaiming_uniform(
+                fan_in, fan_out,
+                shape=(kernel_size, kernel_size, in_channels, out_channels),
+                device=device, dtype=dtype
+            )
+        )
+
+        # Initialize bias (out,)
+        if bias:
+            bound = 1.0 / math.sqrt(in_channels * kernel_size * kernel_size)
+            self.bias = Parameter(
+                init.rand(out_channels, low=-bound, high=bound, device=device, dtype=dtype)
+            )
+        else:
+            self.bias = None
+
+        self.padding = kernel_size // 2
         ### END YOUR SOLUTION
 
     def forward(self, x: Tensor) -> Tensor:
         ### BEGIN YOUR SOLUTION
-        raise NotImplementedError()
+        # x is passed in as (N, C, H, W)
+        # want (N, H, W, C) instead 
+        x_nhwc = x.transpose((1, 2)).transpose((2, 3))
+
+        # Apply convolution
+        out = ops.conv(x_nhwc, self.weight, stride=self.stride, padding=self.padding)
+
+        # bias 
+        if self.bias is not None:
+            out = out + self.bias.reshape((1, 1, 1, self.out_channels)).broadcast_to(out.shape)
+
+        # Convert back to (N, C, H, W)
+        out_nchw = out.transpose((2, 3)).transpose((1, 2))
+        return out_nchw
         ### END YOUR SOLUTION

@@ -60,12 +60,39 @@ class DataLoader:
 
     def __iter__(self):
         ### BEGIN YOUR SOLUTION
-        raise NotImplementedError()
+        self.batch_idx = 0
+        if self.shuffle:
+            indices = np.arange(len(self.dataset))
+            np.random.shuffle(indices)
+            self.ordering = np.array_split(indices, range(self.batch_size, len(self.dataset), self.batch_size))
         ### END YOUR SOLUTION
         return self
 
     def __next__(self):
         ### BEGIN YOUR SOLUTION
-        raise NotImplementedError()
+        if self.batch_idx >= len(self.ordering):
+            raise StopIteration
+
+        batch_indices = self.ordering[self.batch_idx]
+        self.batch_idx += 1
+
+        # Collect batch samples
+        batch_samples = [self.dataset[int(i)] for i in batch_indices]
+
+        # Determine structure - check first sample
+        first_sample = batch_samples[0]
+
+        if isinstance(first_sample, tuple):
+            # Dataset returns tuples (e.g., NDArrayDataset, MNISTDataset)
+            num_elements = len(first_sample)
+            batches = []
+            for i in range(num_elements):
+                batch_data = np.array([sample[i] for sample in batch_samples])
+                batches.append(Tensor(batch_data))
+            return tuple(batches)
+        else:
+            # Single value returned
+            batch_data = np.array(batch_samples)
+            return Tensor(batch_data)
         ### END YOUR SOLUTION
 

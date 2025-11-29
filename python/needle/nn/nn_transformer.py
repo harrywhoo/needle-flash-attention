@@ -14,6 +14,7 @@ from .nn_basic import (
     Linear,
     Sequential
 )
+import numpy as np
 
 
 class MultiHeadAttention(Module):
@@ -99,7 +100,7 @@ class MultiHeadAttention(Module):
         Input: three states q, k, v, with shape (batch_size, num_head, seq_len, dim_head)
         Output: the activation output `result` and attention softmax probability `probs` (with dropout applied)
         """
-        batch_size, num_head, queries_len, q_dim = q.shape
+        batch_size, num_head, queries_len, q_dim = q.shape # N, H, T, d
         _, _, keys_values_len, k_dim = k.shape
         _, _, _, v_dim = v.shape
 
@@ -109,7 +110,18 @@ class MultiHeadAttention(Module):
         probs = None
 
         ### BEGIN YOUR SOLUTION
-        raise NotImplementedError()
+        weight_matrix = self.matmul(q, k) / (q_dim ** 0.5) # (N, H, T, T)
+
+        if self.causal:
+            mask = self.create_causal_mask(queries_len, keys_values_len, weight_matrix.device)
+            mask_tensor = Tensor(mask, device=weight_matrix.device, dtype=weight_matrix.dtype)
+            mask_tensor = mask_tensor.broadcast_to(weight_matrix.shape)
+            weight_matrix = weight_matrix + mask_tensor
+
+        probs = self.dropout(self.softmax(weight_matrix))
+
+        v_T = ops.transpose(v, axes=(2, 3)) # (N, H, d, T)
+        result = self.matmul(probs, v_T) # (N, H, T, d)
         ### END YOUR SOLUTION
 
         return result, probs
@@ -161,7 +173,8 @@ class AttentionLayer(Module):
 
         inner_dim = num_head * dim_head
         
-        self.q_projection = Linear(
+        # W_q, W_k, W_v
+        self.q_projection = Linear( 
             q_features, inner_dim, bias=False,
             device=device, dtype=dtype)
         self.k_projection = Linear(
@@ -203,7 +216,44 @@ class AttentionLayer(Module):
         result = None
 
         ### BEGIN YOUR SOLUTION
-        raise NotImplementedError()
+        # Reshape 3D inputs to 2D for prenorm and projection
+        # (B, T, D) -> (B*T, D)
+        q = q.reshape((batch_size * queries_len, q_dim))
+        k = k.reshape((batch_size * keys_values_len, k_dim))
+        v = v.reshape((batch_size * keys_values_len, v_dim))
+
+        # Apply prenorm and linear projections
+        q_prime = self.q_projection(self.prenorm_q(q))
+        k_prime = self.k_projection(self.prenorm_k(k))
+        v_prime = self.v_projection(self.prenorm_v(v))
+
+        # Reshape back to 3D and separate heads
+        # (B*T, H*d) to (B, T, H, d)
+        q_prime = q_prime.reshape((batch_size, queries_len, self.num_head, self.dim_head))
+        k_prime = k_prime.reshape((batch_size, keys_values_len, self.num_head, self.dim_head))
+        v_prime = v_prime.reshape((batch_size, keys_values_len, self.num_head, self.dim_head))
+
+        # Transpose to (B, H, T, d) for MHA
+        q_prime = ops.transpose(q_prime, axes=(1, 2))
+        k_prime = ops.transpose(k_prime, axes=(1, 2))
+        v_prime = ops.transpose(v_prime, axes=(1, 2))
+
+        # MHA
+        attn, probs = self.attn(q_prime, k_prime, v_prime) # (B, H, T, d)
+        self.probs = probs
+
+        # Transpose back
+        attn = ops.transpose(attn, axes=(1, 2)) # (B, T, H, d)
+
+        # merge heads
+        attn = attn.reshape((batch_size, queries_len, self.num_head * self.dim_head))
+
+        # Reshape to 2D for output projection
+        attn = attn.reshape((batch_size * queries_len, self.num_head * self.dim_head))
+        result = self.out_projection(attn)
+
+        # Reshape back to 3D
+        result = result.reshape((batch_size, queries_len, self.out_features))
         ### END YOUR SOLUTION
 
         return result
@@ -230,7 +280,13 @@ class TransformerLayer(Module):
         self.dtype = dtype
 
         ### BEGIN YOUR SOLUTION
-        raise NotImplementedError()
+        self.attn = AttentionLayer(q_features, num_head, dim_head, dropout=dropout,
+                                   causal=causal, device=device, dtype=dtype)
+        self.layer_norm = LayerNorm1d(q_features, device=device, dtype=dtype)
+        self.linear1 = Linear(q_features, hidden_size, device=device, dtype=dtype)
+        self.linear2 = Linear(hidden_size, q_features, device=device, dtype=dtype)
+        self.dropout = Dropout(dropout)
+        self.relu = ReLU()
         ### END YOUR SOLUTION
 
     def forward(
@@ -246,7 +302,25 @@ class TransformerLayer(Module):
         batch_size, seq_len, x_dim = x.shape
 
         ### BEGIN YOUR SOLUTION
-        raise NotImplementedError()
+        x = x + self.dropout(self.attn(x))
+
+        # x = x + Dropout(Linear2(Dropout(ReLU(Linear1(LayerNorm(x))))))
+        # Reshape to 2D for LayerNorm and Linear layers
+        x_2d = x.reshape((batch_size * seq_len, x_dim))
+
+        mlp_out = self.layer_norm(x_2d)
+        mlp_out = self.linear1(mlp_out)
+        mlp_out = self.relu(mlp_out)
+        mlp_out = self.dropout(mlp_out)
+
+        mlp_out = self.linear2(mlp_out)
+        mlp_out = self.dropout(mlp_out)
+
+        # Reshape back to 3D
+        mlp_out = mlp_out.reshape((batch_size, seq_len, x_dim))
+
+        # Residual connection
+        x = x + mlp_out
         ### END YOUR SOLUTION
 
         return x
@@ -256,7 +330,7 @@ class Transformer(Module):
 
     def __init__(
         self,
-        embedding_size: int,
+        embedding_size: int, # same as q_features, d_model
         hidden_size: int,
         num_layers: int, 
         *,
@@ -277,7 +351,18 @@ class Transformer(Module):
         self.batch_first = batch_first
 
         ### BEGIN YOUR SOLUTION
-        raise NotImplementedError()
+        self.pos_embedding = Embedding(
+            num_embeddings=sequence_len, embedding_dim=embedding_size,
+            device=device, dtype=dtype)
+
+        self.layers = [
+            TransformerLayer(
+                q_features=embedding_size, num_head=num_head,
+                dim_head=dim_head, hidden_size=hidden_size,
+                dropout=dropout, causal=causal,
+                device=device, dtype=dtype)
+            for _ in range(num_layers)
+        ]
         ### END YOUR SOLUTION
 
     def forward(
@@ -289,7 +374,26 @@ class Transformer(Module):
             x = ops.transpose(x, axes=(0, 1))
 
         ### BEGIN YOUR SOLUTION
-        raise NotImplementedError()
+        batch_size, seq_len, embedding_size = x.shape # embedding_size same as d_model
+
+        # positional embedding
+        pos_ids = Tensor(np.arange(seq_len, dtype="int32"), device=self.device) # (seq_len, ): [0, 1, 2, ... seq_len-1]
+
+        # reshape to (seq_len, 1)
+        pos_ids = pos_ids.reshape((seq_len, 1))
+
+        # broadcast to (seq_len, batch_size)
+        pos_ids = pos_ids.broadcast_to((seq_len, batch_size))
+
+        positional_embedding = self.pos_embedding(pos_ids) # (seq_len, batch_size, embedding_size)
+
+        # transpose to (batch_size, seq_len, embedding_size)
+        positional_embedding = ops.transpose(positional_embedding, axes=(1, 0))
+
+        x = x + positional_embedding
+
+        for layer in self.layers:
+            x = layer(x)
         ### END YOUR SOLUTION
 
         if not self.batch_first:

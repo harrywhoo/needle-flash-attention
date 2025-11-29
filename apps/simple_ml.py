@@ -14,7 +14,7 @@ from apps.models import *
 import time
 device = ndl.cpu()
 
-def parse_mnist(image_filesname, label_filename):
+def parse_mnist(image_filename, label_filename):
     """Read an images and labels file in MNIST format.  See this page:
     http://yann.lecun.com/exdb/mnist/ for a description of the file format.
 
@@ -37,7 +37,30 @@ def parse_mnist(image_filesname, label_filename):
                 for MNIST will contain the values 0-9.
     """
     ### BEGIN YOUR SOLUTION
-    raise NotImplementedError()
+    # labels
+    with gzip.open(label_filename, 'rb') as label_file:
+        magic = int.from_bytes(label_file.read(4), 'big')
+        if magic != 2049:
+            raise ValueError("Invalid magic number in label file")
+        num_labels = int.from_bytes(label_file.read(4), 'big')
+        labels_bytes = label_file.read(num_labels)
+        y = np.frombuffer(labels_bytes, dtype=np.uint8)
+
+    # Images
+    with gzip.open(image_filename, 'rb') as image_file:
+        magic = int.from_bytes(image_file.read(4), 'big')
+        if magic != 2051:
+            raise ValueError("Invalid magic number in image file")
+        num_images = int.from_bytes(image_file.read(4), 'big')
+        rows = int.from_bytes(image_file.read(4), 'big')
+        cols = int.from_bytes(image_file.read(4), 'big')
+        pixels = num_images * rows * cols
+        image_bytes = image_file.read(pixels)
+        X = np.frombuffer(image_bytes, dtype=np.uint8)
+        # reshape dimensions and normalize to 0-1
+        X = X.reshape(num_images, rows * cols).astype(np.float32) / 255.0
+
+    return (X, y)
     ### END YOUR SOLUTION
 
 
@@ -58,14 +81,19 @@ def softmax_loss(Z, y_one_hot):
         Average softmax loss over the sample. (ndl.Tensor[np.float32])
     """
     ### BEGIN YOUR SOLUTION
-    raise NotImplementedError()
+    log_sum_exp = ndl.log(ndl.summation(ndl.exp(Z), axes=1))
+    true_logits = ndl.summation(Z * y_one_hot, axes=1)
+    loss_per_example = log_sum_exp - true_logits
+    batch_size = Z.shape[0]
+    average_loss = ndl.summation(loss_per_example) / batch_size
+    return average_loss
     ### END YOUR SOLUTION
 
 
 def nn_epoch(X, y, W1, W2, lr=0.1, batch=100):
     """Run a single epoch of SGD for a two-layer neural network defined by the
     weights W1 and W2 (with no bias terms):
-        logits = ReLU(X * W1) * W1
+        logits = ReLU(X * W1) * W2
     The function should use the step size lr, and the specified batch size (and
     again, without randomizing the order of X).
 
@@ -87,7 +115,39 @@ def nn_epoch(X, y, W1, W2, lr=0.1, batch=100):
     """
 
     ### BEGIN YOUR SOLUTION
-    raise NotImplementedError()
+    n = X.shape[0]
+    d = W1.shape[1]
+    k = W2.shape[1]
+
+    for i in range(0, n, batch):
+        X_batch = X[i:i+batch]
+        y_batch = y[i:i+batch]
+        m = X_batch.shape[0]
+
+        X_batch_tensor = ndl.Tensor(X_batch, requires_grad=False)
+        one_hot = np.zeros((m, k), dtype=X_batch.dtype)
+        one_hot[np.arange(m), y_batch] = 1.0
+
+        y_batch_tensor = ndl.Tensor(one_hot, requires_grad=False)
+
+        # forward
+        Z1 = ndl.relu(ndl.matmul(X_batch_tensor, W1))
+        logits = ndl.matmul(Z1, W2)
+
+        lse = ndl.log(ndl.summation(ndl.exp(logits), axes=(1,)))
+        true_logit = ndl.summation(ndl.multiply(logits, y_batch_tensor), axes=(1,))
+        loss = ndl.summation(lse - true_logit) / m
+
+        # backward
+        loss.backward()
+
+        # update weights
+        W1_numpy = W1.numpy() - lr * W1.grad.numpy()
+        W2_numpy = W2.numpy() - lr * W2.grad.numpy()
+        W1 = ndl.Tensor(W1_numpy, requires_grad=True)
+        W2 = ndl.Tensor(W2_numpy, requires_grad=True)
+
+    return W1, W2
     ### END YOUR SOLUTION
 
 ### CIFAR-10 training ###
@@ -110,7 +170,40 @@ def epoch_general_cifar10(dataloader, model, loss_fn=nn.SoftmaxLoss(), opt=None)
     """
     np.random.seed(4)
     ### BEGIN YOUR SOLUTION
-    raise NotImplementedError()
+    total_loss = 0.0
+    total_correct = 0
+    total_samples = 0
+
+    if opt is not None:
+        model.train()
+    else:
+        model.eval()
+
+    for batch in dataloader:
+        X, y = batch
+
+        # Forward pass
+        logits = model(X)
+        loss = loss_fn(logits, y)
+
+        # Compute accuracy
+        predictions = np.argmax(logits.numpy(), axis=1)
+        correct = np.sum(predictions == y.numpy())
+
+        total_loss += loss.numpy() * X.shape[0]
+        total_correct += correct
+        total_samples += X.shape[0]
+
+        # Backward pass and optimization (if training)
+        if opt is not None:
+            opt.reset_grad()
+            loss.backward()
+            opt.step()
+
+    avg_loss = total_loss / total_samples
+    avg_acc = total_correct / total_samples
+
+    return avg_acc, avg_loss
     ### END YOUR SOLUTION
 
 
@@ -134,7 +227,13 @@ def train_cifar10(model, dataloader, n_epochs=1, optimizer=ndl.optim.Adam,
     """
     np.random.seed(4)
     ### BEGIN YOUR SOLUTION
-    raise NotImplementedError()
+    opt = optimizer(model.parameters(), lr=lr, weight_decay=weight_decay)
+    loss_function = loss_fn()
+
+    for epoch in range(n_epochs):
+        avg_acc, avg_loss = epoch_general_cifar10(dataloader, model, loss_function, opt)
+
+    return avg_acc, avg_loss
     ### END YOUR SOLUTION
 
 
@@ -153,7 +252,9 @@ def evaluate_cifar10(model, dataloader, loss_fn=nn.SoftmaxLoss):
     """
     np.random.seed(4)
     ### BEGIN YOUR SOLUTION
-    raise NotImplementedError()
+    loss_fn_instance = loss_fn()
+    avg_acc, avg_loss = epoch_general_cifar10(dataloader, model, loss_fn_instance, opt=None)
+    return avg_acc, avg_loss
     ### END YOUR SOLUTION
 
 
@@ -180,7 +281,43 @@ def epoch_general_ptb(data, model, seq_len=40, loss_fn=nn.SoftmaxLoss(), opt=Non
     """
     np.random.seed(4)
     ### BEGIN YOUR SOLUTION
-    raise NotImplementedError()
+    if opt:
+        model.train()
+    else:
+        model.eval()
+
+    total_loss = 0.0
+    total_correct = 0
+    total_samples = 0
+
+    nbatch = len(data)
+    h = None
+
+    for i in range(0, nbatch - 1, seq_len):
+        X, y = ndl.data.get_batch(data, i, seq_len, device=device, dtype=dtype)
+
+        logits, h = model(X, h)
+
+        if isinstance(h, tuple):
+            h = (h[0].detach(), h[1].detach())
+        else:
+            h = h.detach()
+
+        loss = loss_fn(logits, y)
+
+        total_loss += loss.numpy() * y.shape[0]
+        total_correct += (logits.numpy().argmax(axis=1) == y.numpy()).sum()
+        total_samples += y.shape[0]
+
+        if opt:
+            opt.reset_grad()
+            loss.backward()
+            opt.step()
+
+    avg_loss = total_loss / total_samples
+    avg_acc = total_correct / total_samples
+
+    return avg_acc, avg_loss
     ### END YOUR SOLUTION
 
 
@@ -207,7 +344,13 @@ def train_ptb(model, data, seq_len=40, n_epochs=1, optimizer=ndl.optim.SGD,
     """
     np.random.seed(4)
     ### BEGIN YOUR SOLUTION
-    raise NotImplementedError()
+    opt = optimizer(model.parameters(), lr=lr, weight_decay=weight_decay)
+    loss_function = loss_fn()
+
+    for epoch in range(n_epochs):
+        avg_acc, avg_loss = epoch_general_ptb(data, model, seq_len, loss_function, opt, clip, device, dtype)
+
+    return avg_acc, avg_loss
     ### END YOUR SOLUTION
 
 def evaluate_ptb(model, data, seq_len=40, loss_fn=nn.SoftmaxLoss,
@@ -227,7 +370,9 @@ def evaluate_ptb(model, data, seq_len=40, loss_fn=nn.SoftmaxLoss,
     """
     np.random.seed(4)
     ### BEGIN YOUR SOLUTION
-    raise NotImplementedError()
+    loss_function = loss_fn()
+    avg_acc, avg_loss = epoch_general_ptb(data, model, seq_len, loss_function, opt=None, device=device, dtype=dtype)
+    return avg_acc, avg_loss
     ### END YOUR SOLUTION
 
 ### CODE BELOW IS FOR ILLUSTRATION, YOU DO NOT NEED TO EDIT
