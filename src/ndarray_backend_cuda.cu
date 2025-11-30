@@ -508,6 +508,50 @@ void ReduceSum(const CudaArray& a, CudaArray* out, size_t reduce_size) {
   /// END SOLUTION
 }
 
+////////////////////////////////////////////////////////////////////////////////
+// FlashAttention operations
+////////////////////////////////////////////////////////////////////////////////
+
+__global__ void FlashAttentionForwardKernel(
+    const scalar_t* Q, const scalar_t* K, const scalar_t* V,
+    scalar_t* O, scalar_t* m, scalar_t* l,
+    uint32_t seq_len, uint32_t head_dim,
+    uint32_t block_m, uint32_t block_n, bool causal
+) {
+  
+}
+
+void FlashAttentionForward(
+    const CudaArray& Q, const CudaArray& K, const CudaArray& V,
+    CudaArray* O, CudaArray* m, CudaArray* l,
+    uint32_t batch_size, uint32_t num_heads, uint32_t seq_len, uint32_t head_dim,
+    uint32_t block_m, uint32_t block_n, bool causal
+) {
+  
+}
+
+
+__global__ void FlashAttentionBackwardKernel(
+    const scalar_t* dO, const scalar_t* Q, const scalar_t* K, const scalar_t* V,
+    const scalar_t* m, const scalar_t* l,
+    scalar_t* dQ, scalar_t* dK, scalar_t* dV,
+    uint32_t seq_len, uint32_t head_dim,
+    uint32_t block_m, uint32_t block_n, bool causal
+) {
+  
+}
+
+void FlashAttentionBackward(
+    const CudaArray& dO, const CudaArray& Q, const CudaArray& K, const CudaArray& V,
+    const CudaArray& m, const CudaArray& l,
+    CudaArray* dQ, CudaArray* dK, CudaArray* dV,
+    uint32_t batch_size, uint32_t num_heads, uint32_t seq_len, uint32_t head_dim,
+    uint32_t block_m, uint32_t block_n, bool causal
+) {
+  
+}
+
+
 }  // namespace cuda
 }  // namespace needle
 
@@ -577,4 +621,8 @@ PYBIND11_MODULE(ndarray_backend_cuda, m) {
 
   m.def("reduce_max", ReduceMax);
   m.def("reduce_sum", ReduceSum);
+
+  // FlashAttention operations
+  m.def("flash_attention_forward", FlashAttentionForward);
+  m.def("flash_attention_backward", FlashAttentionBackward);
 }
