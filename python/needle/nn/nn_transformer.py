@@ -28,6 +28,9 @@ class MultiHeadAttention(Module):
         causal = False,
         device = None,
         dtype = "float32",
+        use_flash_attention = False,
+        block_m = 128,
+        block_n = None,
     ):
 
         super().__init__()
@@ -37,6 +40,9 @@ class MultiHeadAttention(Module):
 
         self.causal = causal
         self.dropout = Dropout(dropout)
+        self.use_flash_attention = use_flash_attention
+        self.block_m = block_m
+        self.block_n = block_n
 
     def create_causal_mask(self, i, j, device):
         """
@@ -110,18 +116,29 @@ class MultiHeadAttention(Module):
         probs = None
 
         ### BEGIN YOUR SOLUTION
-        weight_matrix = self.matmul(q, k) / (q_dim ** 0.5) # (N, H, T, T)
+        if self.use_flash_attention:
+            # Use FlashAttention
+            result = ops.flash_attention(q, k, v,
+                                    causal=self.causal,
+                                    block_m=self.block_m,
+                                    block_n=self.block_n)
+            # FlashAttention doesn't return attention probabilities
+            # since that would defeat the memory savings
+            probs = None
+        else:
+            # Use standard attention
+            weight_matrix = self.matmul(q, k) / (q_dim ** 0.5) # (N, H, T, T)
 
-        if self.causal:
-            mask = self.create_causal_mask(queries_len, keys_values_len, weight_matrix.device)
-            mask_tensor = Tensor(mask, device=weight_matrix.device, dtype=weight_matrix.dtype)
-            mask_tensor = mask_tensor.broadcast_to(weight_matrix.shape)
-            weight_matrix = weight_matrix + mask_tensor
+            if self.causal:
+                mask = self.create_causal_mask(queries_len, keys_values_len, weight_matrix.device)
+                mask_tensor = Tensor(mask, device=weight_matrix.device, dtype=weight_matrix.dtype)
+                mask_tensor = mask_tensor.broadcast_to(weight_matrix.shape)
+                weight_matrix = weight_matrix + mask_tensor
 
-        probs = self.dropout(self.softmax(weight_matrix))
+            probs = self.dropout(self.softmax(weight_matrix))
 
-        v_T = ops.transpose(v, axes=(2, 3)) # (N, H, d, T)
-        result = self.matmul(probs, v_T) # (N, H, T, d)
+            v_T = ops.transpose(v, axes=(2, 3)) # (N, H, d, T)
+            result = self.matmul(probs, v_T) # (N, H, T, d)
         ### END YOUR SOLUTION
 
         return result, probs
@@ -142,6 +159,9 @@ class AttentionLayer(Module):
         causal = True,
         device = None,
         dtype = "float32",
+        use_flash_attention = False,
+        block_m = 128,
+        block_n = None,
     ):
 
         super().__init__()
@@ -186,7 +206,9 @@ class AttentionLayer(Module):
 
         self.attn = MultiHeadAttention(
             dropout=dropout, causal=causal,
-            device=device, dtype=dtype)
+            device=device, dtype=dtype,
+            use_flash_attention=use_flash_attention,
+            block_m=block_m, block_n=block_n)
 
         self.out_projection = Linear(
             inner_dim, out_features, bias=False,
