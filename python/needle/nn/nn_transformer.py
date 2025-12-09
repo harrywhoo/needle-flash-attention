@@ -29,8 +29,8 @@ class MultiHeadAttention(Module):
         device = None,
         dtype = "float32",
         use_flash_attention = False,
-        block_m = 128,
-        block_n = None,
+        Dc = 128, # Column block size for K, V
+        Dr = None, # Row block size for Q
     ):
 
         super().__init__()
@@ -41,61 +41,8 @@ class MultiHeadAttention(Module):
         self.causal = causal
         self.dropout = Dropout(dropout)
         self.use_flash_attention = use_flash_attention
-        self.block_m = block_m
-        self.block_n = block_n
-
-    def create_causal_mask(self, i, j, device):
-        """
-        return a triangular causal mask.
-        Input: i, j: the shape of the mask to be created
-        """
-        mask = -np.finfo(np.float32).max * np.triu(
-            np.ones((1, 1, i, j), dtype=np.float32), j - i + 1)
-
-        return ndarray.array(
-            mask, device=device)
-
-    def matmul(self, a, b_transpose):
-        """
-        batched matrix multiplication;
-        """
-        a_shape = (*a.shape[:-1], 1, *a.shape[-1:])
-        a = a.reshape(a_shape)
-
-        b_transpose_shape = (*b_transpose.shape[:-2], 1, *b_transpose.shape[-2:])
-        b_transpose = b_transpose.reshape(b_transpose_shape)
-
-        broadcast_shape = list(a_shape)
-        broadcast_shape[-2] = b_transpose_shape[-2]
-        a = a.broadcast_to(broadcast_shape)
-
-        broadcast_shape = list(b_transpose_shape)
-        broadcast_shape[-3] = a_shape[-3]
-        b_transpose = b_transpose.broadcast_to(broadcast_shape)
-
-        return (a * b_transpose).sum(len(a.shape) - 1)
-
-    def softmax(self, logit):
-        """
-        The softmax function; 
-        """
-        max_val = Tensor(
-            logit.realize_cached_data().max(axis=3),
-            device=logit.device,
-            dtype=logit.dtype,
-            requires_grad=False
-        )
-
-        max_val = max_val.reshape((*logit.shape[:-1], 1))
-        max_val = max_val.broadcast_to(logit.shape)
-
-        probs = ops.exp(logit - max_val)
-
-        denom = probs.sum(axes=3)
-        denom = denom.reshape((*logit.shape[:-1], 1))
-        denom = denom.broadcast_to(logit.shape)
-
-        return probs / denom
+        self.Dc = Dc
+        self.Dr = Dr
 
     def forward(
         self,
@@ -117,28 +64,11 @@ class MultiHeadAttention(Module):
 
         ### BEGIN YOUR SOLUTION
         if self.use_flash_attention:
-            # Use FlashAttention
-            result = ops.flash_attention(q, k, v,
-                                    causal=self.causal,
-                                    block_m=self.block_m,
-                                    block_n=self.block_n)
-            # FlashAttention doesn't return attention probabilities
-            # since that would defeat the memory savings
+            result = ops.flash_attention(q, k, v, causal=self.causal, Dc=self.Dc, Dr=self.Dr)
+            # Don't return attention probs for FA since that would defeat memory savings 
             probs = None
         else:
-            # Use standard attention
-            weight_matrix = self.matmul(q, k) / (q_dim ** 0.5) # (N, H, T, T)
-
-            if self.causal:
-                mask = self.create_causal_mask(queries_len, keys_values_len, weight_matrix.device)
-                mask_tensor = Tensor(mask, device=weight_matrix.device, dtype=weight_matrix.dtype)
-                mask_tensor = mask_tensor.broadcast_to(weight_matrix.shape)
-                weight_matrix = weight_matrix + mask_tensor
-
-            probs = self.dropout(self.softmax(weight_matrix))
-
-            v_T = ops.transpose(v, axes=(2, 3)) # (N, H, d, T)
-            result = self.matmul(probs, v_T) # (N, H, T, d)
+            result, probs = ops.regular_attention(q, k, v, causal=self.causal, dropout=self.dropout)
         ### END YOUR SOLUTION
 
         return result, probs
@@ -160,8 +90,8 @@ class AttentionLayer(Module):
         device = None,
         dtype = "float32",
         use_flash_attention = False,
-        block_m = 128,
-        block_n = None,
+        Dc = 128,       
+        Dr = None,
     ):
 
         super().__init__()
@@ -208,7 +138,7 @@ class AttentionLayer(Module):
             dropout=dropout, causal=causal,
             device=device, dtype=dtype,
             use_flash_attention=use_flash_attention,
-            block_m=block_m, block_n=block_n)
+            Dc=Dc, Dr=Dr)
 
         self.out_projection = Linear(
             inner_dim, out_features, bias=False,

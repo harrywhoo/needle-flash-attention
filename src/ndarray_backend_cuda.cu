@@ -515,40 +515,55 @@ void ReduceSum(const CudaArray& a, CudaArray* out, size_t reduce_size) {
 __global__ void FlashAttentionForwardKernel(
     const scalar_t* Q, const scalar_t* K, const scalar_t* V,
     scalar_t* O, scalar_t* m, scalar_t* l,
-    uint32_t seq_len, uint32_t head_dim,
-    uint32_t block_m, uint32_t block_n, bool causal
+    uint32_t N, // sequence length
+    uint32_t d, // head dimension
+    uint32_t Tc, // total column blocks = ceil(N / Bc)
+    uint32_t Tr, // total row blocks = ceil(N / Br)
+    uint32_t Bc, // column block size (K/V)
+    uint32_t Br, // row block size (Q)
+    scalar_t softmax_scale, // 1.0 / sqrt(d)
+    bool causal
 ) {
-  
 }
 
 void FlashAttentionForward(
     const CudaArray& Q, const CudaArray& K, const CudaArray& V,
     CudaArray* O, CudaArray* m, CudaArray* l,
-    uint32_t batch_size, uint32_t num_heads, uint32_t seq_len, uint32_t head_dim,
-    uint32_t block_m, uint32_t block_n, bool causal
+    uint32_t batch_size, uint32_t num_heads,
+    uint32_t N, // sequence length
+    uint32_t d, // head dimension
+    uint32_t Bc, // column block size
+    uint32_t Br, // row block size
+    bool causal
 ) {
-  
 }
 
-
 __global__ void FlashAttentionBackwardKernel(
-    const scalar_t* dO, const scalar_t* Q, const scalar_t* K, const scalar_t* V,
-    const scalar_t* m, const scalar_t* l,
+    const scalar_t* dO,
+    const scalar_t* Q, const scalar_t* K, const scalar_t* V,
+    const scalar_t* O, // forward output 
+    const scalar_t* m, const scalar_t* l, // forward statistics
     scalar_t* dQ, scalar_t* dK, scalar_t* dV,
-    uint32_t seq_len, uint32_t head_dim,
-    uint32_t block_m, uint32_t block_n, bool causal
+    uint32_t N, uint32_t d,
+    uint32_t Tc, uint32_t Tr,
+    uint32_t Bc, uint32_t Br,
+    scalar_t softmax_scale,
+    bool causal
 ) {
-  
+
 }
 
 void FlashAttentionBackward(
     const CudaArray& dO, const CudaArray& Q, const CudaArray& K, const CudaArray& V,
+    const CudaArray& O,
     const CudaArray& m, const CudaArray& l,
     CudaArray* dQ, CudaArray* dK, CudaArray* dV,
-    uint32_t batch_size, uint32_t num_heads, uint32_t seq_len, uint32_t head_dim,
-    uint32_t block_m, uint32_t block_n, bool causal
+    uint32_t batch_size, uint32_t num_heads,
+    uint32_t N, uint32_t d,
+    uint32_t Bc, uint32_t Br,
+    bool causal
 ) {
-  
+
 }
 
 
