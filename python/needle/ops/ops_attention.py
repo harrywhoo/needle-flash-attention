@@ -55,7 +55,8 @@ class FlashAttention(TensorOp):
 
     def gradient(self, out_grad, node):
         q, k, v = node.inputs
-        grads = flash_attention_grad(out_grad, q, k, v, node, 
+        # Pass the output tensor which has cached m and l statistics
+        grads = flash_attention_grad(out_grad, q, k, v, node.output, 
                                   self.causal, self.block_m, self.block_n)
         return tuple(grads)
 
