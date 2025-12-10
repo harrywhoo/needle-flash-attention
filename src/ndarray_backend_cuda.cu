@@ -513,32 +513,225 @@ void ReduceSum(const CudaArray& a, CudaArray* out, size_t reduce_size) {
 ////////////////////////////////////////////////////////////////////////////////
 
 __global__ void FlashAttentionForwardKernel(
-    const scalar_t* Q, const scalar_t* K, const scalar_t* V,
-    scalar_t* O, scalar_t* m, scalar_t* l,
+    const scalar_t* __restrict__ Q, 
+    const scalar_t* __restrict__ K, 
+    const scalar_t* __restrict__ V,
+    scalar_t* __restrict__ O, 
+    scalar_t* __restrict__ m, 
+    scalar_t* __restrict__ l,
     uint32_t seq_len, uint32_t head_dim,
-    uint32_t block_m, uint32_t block_n, bool causal
-) {
-  
+    uint32_t block_m, uint32_t block_n, bool causal) 
+{
+    int tx = threadIdx.x;
+    int batch_idx = blockIdx.x;
+    int head_idx = blockIdx.y;
+
+    int offset_qkv = (batch_idx * gridDim.y * seq_len * head_dim) + (head_idx * seq_len * head_dim);
+    int offset_ml  = (batch_idx * gridDim.y * seq_len) + (head_idx * seq_len);
+
+    const scalar_t* q_ptr = Q + offset_qkv;
+    const scalar_t* k_ptr = K + offset_qkv;
+    const scalar_t* v_ptr = V + offset_qkv;
+    scalar_t* o_ptr = O + offset_qkv;
+    scalar_t* m_ptr = m + offset_ml;
+    scalar_t* l_ptr = l + offset_ml;
+
+    for (int i_base = 0; i_base < seq_len; i_base += block_m) {
+        int i_end = min(i_base + block_m, seq_len);
+        for (int i = i_base; i < i_end; ++i) {
+            scalar_t m_i = -INFINITY;
+            scalar_t l_i = 0.0f;
+            scalar_t acc_o = 0.0f; 
+
+            for (int j_base = 0; j_base < seq_len; j_base += block_n) {
+                int j_end = min(j_base + block_n, seq_len);
+                for (int j = j_base; j < j_end; ++j) {
+                    if (causal && j > i) continue;
+
+                    scalar_t score = 0.0f;
+                    for (int d = 0; d < head_dim; ++d) {
+                        score += q_ptr[i * head_dim + d] * k_ptr[j * head_dim + d];
+                    }
+                    score /= sqrtf((float)head_dim);
+
+                    scalar_t m_prev = m_i;
+                    m_i = max(m_prev, score);
+                    scalar_t P_ij = expf(score - m_i);
+                    
+                    l_i = expf(m_prev - m_i) * l_i + P_ij;
+                    
+                    if (tx < head_dim) {
+                         acc_o = acc_o * expf(m_prev - m_i) + P_ij * v_ptr[j * head_dim + tx];
+                    }
+                }
+            }
+
+            if (tx < head_dim) {
+                o_ptr[i * head_dim + tx] = acc_o / l_i;
+            }
+            
+            if (tx == 0) {
+                m_ptr[i] = m_i;
+                l_ptr[i] = l_i;
+            }
+        }
+    }
 }
+
+
+// ============================================================================
+// BACKWARD KERNELS
+// ============================================================================
+
+__global__ void ComputeDeltaKernel(
+    const scalar_t* __restrict__ dO,
+    const scalar_t* __restrict__ Q,
+    const scalar_t* __restrict__ K,
+    const scalar_t* __restrict__ V,
+    const scalar_t* __restrict__ m,
+    const scalar_t* __restrict__ l,
+    scalar_t* __restrict__ delta,
+    uint32_t seq_len, uint32_t head_dim, bool causal
+) {
+    int i = blockIdx.x * blockDim.x + threadIdx.x;
+    if (i >= seq_len) return;
+
+    int batch_idx = blockIdx.y;
+    int head_idx = blockIdx.z;
+
+    int offset_qkv = (batch_idx * gridDim.z * seq_len * head_dim) + (head_idx * seq_len * head_dim);
+    int offset_ml  = (batch_idx * gridDim.z * seq_len) + (head_idx * seq_len);
+
+    const scalar_t* q_ptr = Q + offset_qkv;
+    const scalar_t* k_ptr = K + offset_qkv;
+    const scalar_t* v_ptr = V + offset_qkv;
+    const scalar_t* do_ptr = dO + offset_qkv;
+    const scalar_t* m_ptr = m + offset_ml;
+    const scalar_t* l_ptr = l + offset_ml;
+    scalar_t* delta_ptr = delta + offset_ml;
+
+    scalar_t m_i = m_ptr[i];
+    scalar_t l_i = l_ptr[i];
+    scalar_t d_i = 0.0f;
+
+    for (int j = 0; j < seq_len; ++j) {
+        if (causal && j > i) continue;
+
+        scalar_t score = 0.0f;
+        for (int d = 0; d < head_dim; ++d) {
+            score += q_ptr[i * head_dim + d] * k_ptr[j * head_dim + d];
+        }
+        score /= sqrtf((float)head_dim);
+        scalar_t p_ij = expf(score - m_i) / l_i;
+
+        scalar_t do_dot_v = 0.0f;
+        for (int d = 0; d < head_dim; ++d) {
+            do_dot_v += do_ptr[i * head_dim + d] * v_ptr[j * head_dim + d];
+        }
+
+        d_i += p_ij * do_dot_v;
+    }
+    
+    delta_ptr[i] = d_i;
+}
+
+__global__ void FlashAttentionBackwardKernel(
+    const scalar_t* __restrict__ dO,
+    const scalar_t* __restrict__ Q,
+    const scalar_t* __restrict__ K,
+    const scalar_t* __restrict__ V,
+    const scalar_t* __restrict__ m,
+    const scalar_t* __restrict__ l,
+    const scalar_t* __restrict__ delta,
+    scalar_t* __restrict__ dQ,
+    scalar_t* __restrict__ dK,
+    scalar_t* __restrict__ dV,
+    uint32_t seq_len, uint32_t head_dim, bool causal
+) {
+    int tx = threadIdx.x; 
+    int batch_idx = blockIdx.x;
+    int head_idx = blockIdx.y;
+
+    int offset_qkv = (batch_idx * gridDim.y * seq_len * head_dim) + (head_idx * seq_len * head_dim);
+    int offset_ml  = (batch_idx * gridDim.y * seq_len) + (head_idx * seq_len);
+
+    const scalar_t* q_ptr = Q + offset_qkv;
+    const scalar_t* k_ptr = K + offset_qkv;
+    const scalar_t* v_ptr = V + offset_qkv;
+    const scalar_t* do_ptr = dO + offset_qkv;
+    
+    scalar_t* dq_ptr = dQ + offset_qkv;
+    scalar_t* dk_ptr = dK + offset_qkv;
+    scalar_t* dv_ptr = dV + offset_qkv;
+    
+    const scalar_t* m_ptr = m + offset_ml;
+    const scalar_t* l_ptr = l + offset_ml;
+    const scalar_t* delta_ptr = delta + offset_ml;
+    
+    // Scaling factor for Q and K gradients
+    scalar_t scale = 1.0f / sqrtf((float)head_dim);
+
+    for (int i = 0; i < seq_len; ++i) {
+        scalar_t m_i = m_ptr[i];
+        scalar_t l_i = l_ptr[i];
+        scalar_t d_i = delta_ptr[i];
+
+        scalar_t acc_dq = 0.0f; 
+
+        for (int j = 0; j < seq_len; ++j) {
+            if (causal && j > i) continue;
+
+            scalar_t score = 0.0f;
+            for (int d = 0; d < head_dim; ++d) {
+                score += q_ptr[i * head_dim + d] * k_ptr[j * head_dim + d];
+            }
+            score /= sqrtf((float)head_dim);
+            scalar_t p_ij = expf(score - m_i) / l_i;
+
+            if (tx < head_dim) {
+                scalar_t val = p_ij * do_ptr[i * head_dim + tx];
+                atomicAdd(&dv_ptr[j * head_dim + tx], val);
+            }
+
+            scalar_t do_dot_v = 0.0f;
+            for (int d = 0; d < head_dim; ++d) {
+                do_dot_v += do_ptr[i * head_dim + d] * v_ptr[j * head_dim + d];
+            }
+            scalar_t ds_ij = p_ij * (do_dot_v - d_i);
+
+            // 3. Update dQ with Scale
+            if (tx < head_dim) {
+                acc_dq += ds_ij * k_ptr[j * head_dim + tx] * scale;
+            }
+
+            // 4. Update dK with Scale
+            if (tx < head_dim) {
+                 scalar_t val = ds_ij * q_ptr[i * head_dim + tx] * scale;
+                 atomicAdd(&dk_ptr[j * head_dim + tx], val);
+            }
+        }
+        
+        if (tx < head_dim) {
+            dq_ptr[i * head_dim + tx] = acc_dq;
+        }
+    }
+}
+
 
 void FlashAttentionForward(
     const CudaArray& Q, const CudaArray& K, const CudaArray& V,
     CudaArray* O, CudaArray* m, CudaArray* l,
     uint32_t batch_size, uint32_t num_heads, uint32_t seq_len, uint32_t head_dim,
-    uint32_t block_m, uint32_t block_n, bool causal
-) {
-  
-}
+    uint32_t block_m, uint32_t block_n, bool causal) 
+{
+    dim3 grid(batch_size, num_heads);
+    dim3 block(head_dim); 
 
-
-__global__ void FlashAttentionBackwardKernel(
-    const scalar_t* dO, const scalar_t* Q, const scalar_t* K, const scalar_t* V,
-    const scalar_t* m, const scalar_t* l,
-    scalar_t* dQ, scalar_t* dK, scalar_t* dV,
-    uint32_t seq_len, uint32_t head_dim,
-    uint32_t block_m, uint32_t block_n, bool causal
-) {
-  
+    FlashAttentionForwardKernel<<<grid, block>>>(
+        Q.ptr, K.ptr, V.ptr,
+        O->ptr, m->ptr, l->ptr,
+        seq_len, head_dim, block_m, block_n, causal
+    );
 }
 
 void FlashAttentionBackward(
@@ -546,9 +739,33 @@ void FlashAttentionBackward(
     const CudaArray& m, const CudaArray& l,
     CudaArray* dQ, CudaArray* dK, CudaArray* dV,
     uint32_t batch_size, uint32_t num_heads, uint32_t seq_len, uint32_t head_dim,
-    uint32_t block_m, uint32_t block_n, bool causal
-) {
-  
+    uint32_t block_m, uint32_t block_n, bool causal) 
+{
+    size_t delta_size = batch_size * num_heads * seq_len * sizeof(scalar_t);
+    scalar_t* d_ptr;
+    cudaMalloc(&d_ptr, delta_size);
+
+    size_t grad_size = batch_size * num_heads * seq_len * head_dim * sizeof(scalar_t);
+    cudaMemset(dQ->ptr, 0, grad_size);
+    cudaMemset(dK->ptr, 0, grad_size);
+    cudaMemset(dV->ptr, 0, grad_size);
+
+    dim3 delta_grid((seq_len + 31) / 32, batch_size, num_heads);
+    dim3 delta_block(32);
+    ComputeDeltaKernel<<<delta_grid, delta_block>>>(
+        dO.ptr, Q.ptr, K.ptr, V.ptr, m.ptr, l.ptr, d_ptr,
+        seq_len, head_dim, causal
+    );
+    
+    dim3 grid(batch_size, num_heads);
+    dim3 block(head_dim); 
+    FlashAttentionBackwardKernel<<<grid, block>>>(
+        dO.ptr, Q.ptr, K.ptr, V.ptr, m.ptr, l.ptr, d_ptr,
+        dQ->ptr, dK->ptr, dV->ptr,
+        seq_len, head_dim, causal
+    );
+
+    cudaFree(d_ptr);
 }
 
 
